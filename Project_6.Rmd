@@ -1,0 +1,95 @@
+---
+title: "Project 6: Predicting Poverty Indicators"
+output: html_notebook
+---
+
+This project explores WDI data in determining the poverty gap at $3.2 a day. Due to the occurance of many missing data points in the data set, many values were excluded in the final regression. Libraries that will be used are readxl, tidyverse, caret, and leaps. We first load the data set and clean the data to determine which countries have the poverty gap indicactor in 2012. 
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(caret)
+library(leaps)
+
+data <- data.frame(read_excel('W03b_wdi.xlsx'))
+data1 <- data[, -c(which(colnames(data) == 'Indicator.Name'),which(colnames(data) == 'Country.Code'),which(colnames(data) == 'X1960'):which(colnames(data) == 'X1980'))]
+
+poverty <- data1 %>% filter(Indicator.Code == "SI.POV.LMIC.GP")
+pov12 <- poverty %>% filter(!X2012 %in% NA)
+wdi <- data1 %>% filter(data$Country.Name %in% pov12$Country.Name)
+
+wdi <- wdi %>% gather(year,values,c(3:ncol(wdi)))
+wdi <- wdi  %>% spread(Indicator.Code, values) 
+```
+
+After this, we then determine which indicators have more than 75% of available data, and filter out those values as good inidcators that do not have much missing data. We then attach the indicator for poverty, SI.POV.LMIC.GP onto those good Indicators due to the poverty index also having many missing values
+
+```{r}
+missing <- wdi %>% summarize_all(funs(sum(is.na(.))/n())) %>%  gather(key="feature", value="missing_pct")
+
+goodv <- filter(missing, missing_pct<0.25)
+goodv <- rbind(goodv,c("SI.POV.LMIC.GP", 10))
+wdi_good <- wdi %>% select(goodv$feature)
+```
+
+We then take out all rows where the poverty index do not have values, and then split up the trial period(1981-2012) with the testing period(2013-2016). We also make every observation in the testing set have complete cases, and then remove the country name and year to make the training set. After this, we then find correlations between all the cariables, are remove variables that have correlation higher than 0.3 to finalize the training set. 
+
+
+```{r}
+no_pov_na <- wdi_good[!is.na(wdi_good$SI.POV.LMIC.GP),]
+test <- wdi[c(which(wdi$year == 'X2013'),which(wdi$year == 'X2014'),which(wdi$year == 'X2015'), which(wdi$year == 'X2016')),]
+
+no_pov_na_complete <- no_pov_na[complete.cases(no_pov_na),]
+train <- no_pov_na_complete[-c(1,2)]
+
+df2 <- cor(train)
+hc <- findCorrelation(df2, cutoff=0.50) 
+hc <- sort(hc)
+hc <- hc[-match(which(colnames(train) == 'SI.POV.LMIC.GP'),hc)]
+train.new = train[,-c(hc)]
+
+```
+Using automatic regression selection, we then select 10 variables to make the final regression model. Any more and my computer will not be able to process it. Using automatic regression, we determine the nine variables were 
+
+Travel services (% of service imports, BoP)
+CO2 emissions from solid fuel consumption (% of total)
+Inflation, consumer prices (annual %)
+Gross savings (% of GDP)
+Population ages 25-29, male (% of male population)
+Rural population growth (annual %)
+Merchandise imports from low- and middle-income economies in Middle East & North Africa (% of total merchandise imports)
+Merchandise imports from low- and middle-income economies in Sub-Saharan Africa (% of total merchandise imports)
+Agricultural raw materials exports (% of merchandise exports)
+Transport services (% of commercial service exports)
+
+
+
+Some of these variables make sense. Many impoverished areas are mostly rural and depend on agriculture, so the more agricultural exports the higher the poverty gap, as well as the rural population growth. This can also explain why the male population between 25-29 is significant, beacuse young men are usually working in these impoverished areas.For the CO2 emissions from solid fuel consumption, this can be explained by the fact that many workers closer to factories can be close to poverty,such that there are higher CO2 emissions due to their working condictions.The adjusted R2 was 0.8036.
+
+```{r}
+subsets <- regsubsets(SI.POV.LMIC.GP~., data = train.new, nvmax = 10, really.big = T)
+summary(subsets)  
+plot(subsets, scale="adjr2")
+plot(subsets, scale="bic")
+
+plot(subsets$rss,xlab="Number of Variables",ylab="RSS",type="l")
+coef(subsets,10)
+fit01 <- lm(SI.POV.LMIC.GP~ BM.GSR.TRVL.ZS+ EN.ATM.CO2E.SF.ZS
+            +FP.CPI.TOTL.ZG +  NY.GNS.ICTR.ZS + SP.POP.2529.MA.5Y
+            + SP.RUR.TOTL.ZG + TM.VAL.MRCH.OR.ZS + TM.VAL.MRCH.R6.ZS + TX.VAL.AGRI.ZS.UN
+            +TX.VAL.TRAN.ZS.WT 
+            , data = train.new)
+summary(fit01)
+plot(fit01$residuals)
+
+```
+In terms of prediction with the training set, the Root Mean square error was 9.22, which is not very good. At closer observation, many of the predicted values do not seem very close. There are also many missing data points to make the prediction, makeing predicting 2015 and 2016 impossible. Since I cut out so many data points, I am not sure if this model can be improved upon without consideration of imputation or other data handling techniques.
+```{r}
+lmpred <- predict(fit01, newdata = test)
+rmse <- sqrt(mean((test$SI.POV.LMIC.GP - lmpred)^2,na.rm = T))
+
+newfile <- data.frame(test$Country.Name, test$year, test$SI.POV.LMIC.GP, lmpred)
+newfile <- newfile[complete.cases(newfile),]
+newfile %>% write_csv('predictions_project6.csv')
+```
